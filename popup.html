@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 12px; width: 220px; background: #000; color: #0f0; font: bold 13px monospace; }
+  h1 { font-size: 14px; margin: 0 0 10px; color: #ff0; }
+  button { display: block; width: 100%; margin: 0 0 8px; padding: 8px; font: bold 13px monospace;
+           border: 2px solid #0f0; border-radius: 6px; background: #000; color: #0f0; cursor: pointer; }
+  button:hover:not(:disabled) { background: #0f0; color: #000; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  #stop { border-color: #f44; color: #f44; }
+  #stop:hover:not(:disabled) { background: #f44; color: #000; }
+  #status { white-space: pre-line; margin-top: 4px; color: #8f8; font-weight: normal; }
+</style>
+</head>
+<body>
+  <h1><img src="icons/icon16.png" width="16" height="16" alt="" style="vertical-align:-3px"> PAC-MAN BOT</h1>
+  <button id="turbo">▶ NEW TURBO GAME</button>
+  <button id="normal">▶ NEW NORMAL GAME</button>
+  <button id="attach">▶ PLAY CURRENT GAME</button>
+  <button id="stop">■ STOP</button>
+  <div id="status">…</div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Pac-Man Bot (pacman.live)",
+  "version": "1.0.0",
+  "description": "Autoplay bot for pacman.live. Start and stop it from the toolbar icon.",
+  "action": {
+    "default_title": "Pac-Man Bot",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://pacman.live/*"],
+      "js": ["pacbot.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://pacman.live/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
