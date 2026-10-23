@@ -84,11 +84,27 @@ const P = {
   clock: {frames: 0, last: null, started: false, trusted: false},
   // tunables
   SIM: {HORIZON: 26, GHOST: 1.0, GHOST_TUNNEL: 0.5, PAC: 1.067, PAC_DOT_PAUSE: 0.13, PAC_FRIGHT: 1.2,
-        GHOST_FRIGHT: 0.67, FRIGHT_TICKS: 40, HIT_R: 1.0},
-  FRAMES_PER_TICK: 8.45, GHOST_MARGIN: 1.04, GHOST_W: 60, ELROY: 20, ADVANCE_FRAC: 0.2,
-  bait: false, fruitOn: false,
+        GHOST_FRIGHT: 0.67, FRIGHT_TICKS: 40, HIT_R: 1.3},
+  FRAMES_PER_TICK: 8.45, GHOST_MARGIN: 1.04, GHOST_SCALE: 1, ELROY: 20, ADVANCE_FRAC: 0.2,
+  bait: false, camp: false, fruitOn: false, fright: {on: false, f0: 0}, eyesBase: 0,
+  BAIT_R: 10, BAIT_N: 3, BAIT_HOLD: 2500, baitUntil: 0, CAMP_R: 16, PELLET_SAVE: -400, PANIC_T: 18, FLASH_SAFE: 30, BOOST: 1, MARGIN: 1.04, L1_GHOST: 1.03, REV_MS: 1000, REV_COST: 30, lastRevT: 0, LAST_DOTS: 4, LAST_DIST_W: 8,
+  events: [], trail: [], deathTrails: [], evState: {pellets: 0, eyes: 0, frightGhosts: 0, blue: false, hd: []},
 };
 window.__pac = P;
+
+// The game runs at most 3 updates per rendered frame, so when rendering is slow game time falls behind the wall
+// clock. Count the game's updates the same way and run the bot's timers on them.
+const GT = {frames: 0, gt: undefined};
+const origRAF = window.requestAnimationFrame.bind(window);
+window.requestAnimationFrame = cb => origRAF(ts => {
+  if (GT.gt === undefined) GT.gt = ts;
+  GT.gt = Math.max(GT.gt, ts - 3000 / 60);
+  while (GT.gt < ts) { GT.frames++; GT.gt += 1000 / 60; }
+  cb(ts);
+});
+P.gameFrames = () => GT.frames;
+// event log for learning from runs: pellets (bait or not), ghosts eaten per fright, deaths, levels
+P.ev = (type, data) => { P.events.push({type, t: Math.round(performance.now() / 100) / 10, level: P.level(), ...data}); if (P.events.length > 2000) P.events.shift(); };
 
 // ---------------------------------------------------------------- reading the screen
 let draws = [], recording = false, gameCtx = null;
@@ -139,8 +155,15 @@ P.readFrame = async function (waitMs) {
     else if (row === 5) out.ghosts.push({name: '?', px, py, dir: null, state: col >= 6 ? 'flashing' : col >= 4 ? 'scared' : 'eyes'});
     else if (row === 0) out.fruit = {px, py};
   }
+  // the game freezes (and pauses its fright timer) for ~1 s after each ghost is eaten; Pac-Man isn't drawn then
+  if (out.pacman || out.ghosts.length) {
+    const sig = [out.pacman, ...out.ghosts].filter(Boolean).map(a => Math.round(a.px) + ',' + Math.round(a.py)).join('|');
+    if (P.fright.on && P.fright.f0 !== undefined && (sig === freeze.sig || !out.pacman)) P.fright.f0 += GT.frames - freeze.f;
+    freeze.sig = sig; freeze.f = GT.frames;
+  }
   return out;
 };
+const freeze = {sig: null, f: 0};
 
 // ---------------------------------------------------------------- dots, pellets, lives
 P.updateEaten = function (pac) {   // mark the dots on every tile Pac-Man passed since the last read
@@ -230,6 +253,7 @@ P.releaseAll = function () {
 // the game ignores a keydown while its key is still "held", so release first
 P.pulseDirection = function (dir) {
   const [key, code] = KEYS[dir];
+  if (dir === OPP[P.lastDir]) P.lastRevT = performance.now();
   if (P.heldCode !== null && P.heldCode !== code) {
     const od = Object.keys(KEYS).find(d => KEYS[d][1] === P.heldCode);
     sendKey('keyup', KEYS[od][0], P.heldCode);
@@ -252,13 +276,13 @@ P.menuKey = async function (key, code) {
 P.level = () => P.stats.levels + 1;
 P.frightSec = () => FRIGHT_S[Math.min(P.level(), 19) - 1] || 0;
 P.resetClock = () => { P.clock = {frames: 0, last: null, started: false, trusted: true}; };
-P.tickClock = function (fr) {
-  const now = performance.now();
+P.tickClock = function (fr) {   // in game frames
   const t = canvasToTile(fr.pacman.px, fr.pacman.py);
-  if (!P.clock.started) { if (t.x !== 13 || t.y !== 26) { P.clock.started = true; P.clock.frames = 8; P.clock.last = now; } return; }
+  if (!P.clock.started) { if (t.x !== 13 || t.y !== 26) { P.clock.started = true; P.clock.frames = 8; P.clock.last = GT.frames; } return; }
   const frightened = fr.ghosts.some(g => g.state === 'scared' || g.state === 'flashing');
-  if (!frightened) P.clock.frames += (now - P.clock.last) * 0.06;
-  P.clock.last = now;
+  if (P.clock.last === null) P.clock.last = GT.frames;
+  if (!frightened) P.clock.frames += GT.frames - P.clock.last;
+  P.clock.last = GT.frames;
 };
 P.modeInfo = function () {
   const lv = P.level(), sched = SCHED[lv >= 5 ? 3 : lv >= 2 ? 2 : 1];
@@ -280,7 +304,7 @@ P.scenarios = function () {
 P.applyLevel = function () {
   const lv = P.level(), S = P.SIM;
   const sp = SPEEDS[lv >= 21 ? 21 : lv >= 5 ? 5 : lv >= 2 ? 2 : 1];
-  P.GHOST_MARGIN = lv >= 5 ? 1.07 : 1.04;   // model ghosts a bit faster than they are, for distance
+  P.GHOST_MARGIN = P.MARGIN;   // model ghosts a bit faster than they are: races are lost by one tile
   P.ELROY = ELROY_DOTS(lv);
   if (P.turbo) {
     // turbo: Pac-Man always takes 2 steps per frame and never pauses to eat; ghosts are unchanged
@@ -294,7 +318,7 @@ P.applyLevel = function () {
     const ref = 1.067 / sp.pac;
     P.FRAMES_PER_TICK = 8.45 / sp.pac;
     S.PAC = 1.067;
-    S.GHOST = lv === 1 ? 1.0 : Math.min(0.99 * 1.067, sp.ghost * ref * P.GHOST_MARGIN);
+    S.GHOST = lv === 1 ? P.L1_GHOST : Math.min(0.99 * 1.067, sp.ghost * ref * P.GHOST_MARGIN);
     S.PAC_FRIGHT = Math.min(1.2, sp.pacF * ref);
     S.GHOST_FRIGHT = sp.ghostF * ref;
     S.GHOST_TUNNEL = Math.max(0.5, sp.tunnel * ref);
@@ -325,12 +349,13 @@ function ghostChoose(g, target) {
 
 // Follow one Pac-Man route (a direction per junction) for HORIZON ticks. At tick `rev` all ghosts reverse
 // and the mode becomes `modeAfter`.
-P.simulate = function (start, route, mode, eatenBase, rev, modeAfter) {
+P.simulate = function (start, route, mode, eatenBase, rev, modeAfter, boost = 1) {
   const S = P.SIM;
   const pac = {x: start.pac.x, y: start.pac.y, dir: route[0], prog: 0};
   const gs = start.ghosts.map(g => ({...g, prog: 0}));
   const eatenLocal = new Set();
-  let ri = 0, dots = 0, pellets = 0, ghostsEaten = 0, fright = start.frightTicks;
+  let ri = 0, dots = 0, pellets = 0, ghostsEaten = 0, ghostPts = 0, fright = start.frightTicks;
+  const eyes0 = start.eyesBase || 0;
   const elroy = start.dotsLeft <= P.ELROY;
   for (let t = 0; t < S.HORIZON; t++) {
     if (t === rev) { for (const g of gs) if (g.state !== 'eyes' && !(g.inPen > 0)) g.dir = OPP[g.dir]; if (modeAfter) mode = modeAfter; }
@@ -360,6 +385,7 @@ P.simulate = function (start, route, mode, eatenBase, rev, modeAfter) {
       const scared = g.state === 'scared';
       let sp = scared ? S.GHOST_FRIGHT : isTunnel(g.x, g.y) ? S.GHOST_TUNNEL : S.GHOST;
       if (g.name === 'blinky' && elroy && !scared) sp *= start.dotsLeft <= P.ELROY / 2 ? 1.13 : 1.07;
+      if (!scared) sp *= boost;
       g.prog += sp;
       g.prev = {x: g.x, y: g.y};
       if (g.prog >= 1) {
@@ -376,12 +402,21 @@ P.simulate = function (start, route, mode, eatenBase, rev, modeAfter) {
         (g.prev.x === pac.x && g.prev.y === pac.y && g.x === prevPac.x && g.y === prevPac.y) ||
         (ddx + Math.abs(gcy - pcy) < S.HIT_R);
       if (hit) {
-        if (g.state === 'scared') { g.state = 'eyes'; ghostsEaten++; }
-        else if (g.state !== 'eyes') return {dead: true, t, dots, pellets, ghostsEaten, pac};
+        if (g.state === 'scared') { g.state = 'eyes'; ghostPts += 200 * 2 ** Math.min(3, eyes0 + ghostsEaten); ghostsEaten++; }
+        else if (g.state !== 'eyes') return {dead: true, t, dots, pellets, ghostsEaten, ghostPts, pac};
       }
     }
   }
-  return {dead: false, t: S.HORIZON, dots, pellets, ghostsEaten, pac, eatenLocal};
+  // scared ghosts still close when the horizon ends are likely catches (the horizon is shorter than fright)
+  let chase = 0, n = eyes0 + ghostsEaten;
+  const reach = fright * Math.max(0.1, S.PAC_FRIGHT - S.GHOST_FRIGHT) + 2;
+  for (const g of gs) {
+    if (g.state !== 'scared') continue;
+    let dx = Math.abs(g.x - pac.x); if (dx > 14) dx = 28 - dx;
+    const d = dx + Math.abs(g.y - pac.y);
+    if (d <= reach) { chase += 0.5 * 200 * 2 ** Math.min(3, n); n++; }
+  }
+  return {dead: false, t: S.HORIZON, dots, pellets, ghostsEaten, ghostPts, chase, pac, eatenLocal, gs};
 };
 
 // ---------------------------------------------------------------- route search and scoring
@@ -417,9 +452,39 @@ function bfs(sources) {
 }
 const FRUIT_DIST = bfs([{x: 13, y: 20}, {x: 14, y: 20}]);
 
-P.dotValue = dl => dl <= 4 ? 300 : 10;      // last dots: finish them, no stand-off with Elroy
-P.distW = dl => dl <= 4 ? 8 : 1.5;
-P.pelletValue = dl => dl <= 50 ? 80 : P.bait ? 90 : -35;   // save pellets as bait unless ghosts are close
+P.dotValue = dl => dl <= P.LAST_DOTS ? 300 : 10;      // last dots: finish them, no stand-off with Elroy
+P.distW = dl => dl <= P.LAST_DOTS ? P.LAST_DIST_W : 1.5;
+// pellets are bait: eat one only when every hunting ghost is close (P.bait); near the end just clear them
+P.pelletValue = dl => P.bait ? 300 : dl <= 12 ? 50 : dl <= 30 ? -60 : P.PELLET_SAVE;
+P.frightTicksNow = () => {
+  if (!P.fright.on) return 0;
+  const left = P.frightSec() * 60 - (GT.frames - P.fright.f0);
+  return Math.max(0, Math.round(left / P.FRAMES_PER_TICK));
+};
+// Territory at the end of a route: tiles Pac-Man reaches strictly before every hunting ghost. A small territory
+// means a pocket or a pincer, where one mispredicted ghost turn is fatal.
+P.SPACE_MIN = 30; P.SPACE_W = 50;
+const DIST = new Int16Array(N * N).fill(INF);   // maze distance between any two tiles
+for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (open(x, y)) DIST.set(bfs([{x, y}]), idx(x, y) * N);
+P.territory = function (pac, gs) {
+  const hs = gs.filter(g => g.state === 'normal' && !(g.inPen > 0)).map(g => idx(g.x, g.y) * N);
+  if (!hs.length) return 99;
+  const seen = new Set([idx(pac.x, pac.y)]), q = [{x: pac.x, y: pac.y, d: 0}];
+  let n = 0, qi = 0;
+  while (qi < q.length && n < P.SPACE_MIN) {
+    const c = q[qi++], ci = idx(c.x, c.y);
+    let gd = INF; for (const h of hs) { const v = DIST[h + ci]; if (v < gd) gd = v; }
+    if (c.d >= gd) continue;
+    n++;
+    for (const d of DIRS) {
+      const nx = wrapX(c.x + DX[d]), ny = c.y + DY[d], k = idx(nx, ny);
+      if (!open(nx, ny) || seen.has(k)) continue;
+      seen.add(k); q.push({x: nx, y: ny, d: c.d + 1});
+    }
+  }
+  return n;
+};
+P.spacePenalty = res => res.gs ? P.SPACE_W * Math.max(0, P.SPACE_MIN - P.territory(res.pac, res.gs)) : 0;
 P.fruitTerm = pac => P.fruitOn ? 6 * Math.max(0, 30 - Math.min(FRUIT_DIST[idx(pac.x, pac.y)], 30)) : 0;
 
 // Score every route under every scenario; keep its worst case; pick the best first direction.
@@ -428,41 +493,59 @@ P.decideCore = function (fr) {
   const pt = tileOf(fr.pacman);
   const dotsArr = []; let dotsLeft = 0;
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (isDotTile(x, y) && !P.eaten.has(tileKey(x, y))) { dotsLeft++; dotsArr.push({x, y}); }
+  const frightNow = P.frightTicksNow();
   let frightTicks = 0;
   const ghosts = fr.ghosts.map(g => {
     const t = tileOf(g);
     const inPen = !open(t.x, t.y) && g.state !== 'eyes';
     const state = g.state === 'flashing' ? 'normal' : g.state;
-    if (state === 'scared') frightTicks = 14;
+    if (state === 'scared') frightTicks = Math.max(frightNow, 3);
     return {name: g.name === '?' ? 'blinky' : g.name, x: inPen ? 13 : t.x, y: inPen ? 14 : t.y, dir: g.dir || 'left', state, inPen: inPen ? 4 : 0};
   });
-  const start = {pac: pt, ghosts, dotsLeft, frightTicks};
+  const start = {pac: pt, ghosts, dotsLeft, frightTicks, eyesBase: P.eyesBase};
   const R = bfs(dotsArr);
+  const pelletsLeft = PELLETS.filter(([x, y]) => !P.eaten.has(tileKey(x, y))).map(([x, y]) => ({x, y}));
+  const RP = pelletsLeft.length ? bfs(pelletsLeft) : null;
   const rs = routes(pt.x, pt.y, Math.round(P.SIM.HORIZON * 1.1));
   const SC = P.scenarios(), LI = SC.length === 3 ? 1 : 0;
-  const byDir = {}, byLikely = {};
+  // races are lost by a tile when a ghost read is slightly off: also require surviving ghosts that are a bit faster
+  if (P.BOOST > 1) SC.push([...SC[LI].slice(0, 3), P.BOOST]);
+  const byDir = {}, byLikely = {}, noPellet = {}, likelyNP = {};
   for (const r of rs) {
-    let worst = Infinity, info = null, likely = -Infinity;
+    let worst = Infinity, info = null, likely = -Infinity, ate = false;
     for (let si = 0; si < SC.length; si++) {
-      const [mode, rev, modeAfter] = SC[si];
-      const res = P.simulate({pac: {...start.pac}, ghosts: start.ghosts.map(g => ({...g})), dotsLeft, frightTicks}, r, mode, P.eaten, rev, modeAfter);
+      const [mode, rev, modeAfter, boost] = SC[si];
+      const res = P.simulate({...start, pac: {...start.pac}, ghosts: start.ghosts.map(g => ({...g}))}, r, mode, P.eaten, rev, modeAfter, boost || 1);
       const s = res.dead ? -100000 + res.t * 100
-        : res.dots * P.dotValue(dotsLeft) + res.pellets * P.pelletValue(dotsLeft) + res.ghostsEaten * P.GHOST_W
-          + P.fruitTerm(res.pac) - P.distW(dotsLeft) * Math.min(R[idx(res.pac.x, res.pac.y)], 60);
+        : res.dots * P.dotValue(dotsLeft) + res.pellets * P.pelletValue(dotsLeft) + P.GHOST_SCALE * (res.ghostPts + res.chase)
+          - (P.camp && RP && !res.pellets ? 4 * Math.min(RP[idx(res.pac.x, res.pac.y)], 25) : 0)
+          + P.fruitTerm(res.pac) - P.distW(dotsLeft) * Math.min(R[idx(res.pac.x, res.pac.y)], 60) - P.spacePenalty(res);
       if (si === LI) likely = s;
+      if (res.pellets) ate = true;
       if (s < worst) { worst = s; info = res; }
     }
     const d = r[0];
-    const keep = (d === P.lastDir ? 10 : 0) - (d === OPP[P.lastDir] ? 30 : 0);   // no dithering
+    // no dithering: a second reversal within REV_MS costs a lot (ghosts close in while Pac-Man goes back and forth)
+    const revCost = performance.now() - P.lastRevT < P.REV_MS ? P.REV_COST : 30;
+    const keep = (d === P.lastDir ? 10 : 0) - (d === OPP[P.lastDir] ? revCost : 0);
     worst += keep;
     if (!byDir[d] || worst > byDir[d].score) byDir[d] = {score: worst, dead: info.dead};
     if (byLikely[d] === undefined || likely + keep > byLikely[d]) byLikely[d] = likely + keep;
+    if (!ate && (!noPellet[d] || worst > noPellet[d].score)) noPellet[d] = {score: worst, dead: info.dead, t: info.t};
+    if (!ate && (likelyNP[d] === undefined || likely + keep > likelyNP[d])) likelyNP[d] = likely + keep;
   }
+  // The worst case almost always "dies" somewhere far ahead, and a pellet makes every ghost harmless, so a
+  // pellet route would win as a panic button. Unless baiting, avoid pellets while some route survives PANIC_T ticks.
+  let bestNP = null;
+  for (const d in noPellet) if (!bestNP || noPellet[d].score > bestNP.score) bestNP = {d, ...noPellet[d]};
+  const usePellet = P.bait || dotsLeft <= 30 || !bestNP || (bestNP.dead && bestNP.t < P.PANIC_T);
   let best = null;
-  for (const d in byDir) if (!best || byDir[d].score > best.score) best = {d, ...byDir[d]};
+  if (!usePellet) best = bestNP;
+  else for (const d in byDir) if (!best || byDir[d].score > best.score) best = {d, ...byDir[d]};
   if (best && best.dead) {
+    const L = usePellet ? byLikely : likelyNP;
     let bl = null;
-    for (const k in byLikely) if (!bl || byLikely[k] > bl.v) bl = {d: k, v: byLikely[k]};
+    for (const k in L) if (!bl || L[k] > bl.v) bl = {d: k, v: L[k]};
     if (bl && bl.v > -50000) best = {...best, d: bl.d, dead: false, likelyPick: true};
   }
   if (!best) return {dir: null, mode: 'stuck'};
@@ -473,11 +556,17 @@ P.decideCore = function (fr) {
 P.decide = function (fr) {
   if (!fr || !fr.pacman || !fr.ghosts) return {dir: null, mode: 'no-pac'};
   const pt = tileOf(fr.pacman);
+  // real remaining fright time (the sim used to assume a fixed 14 ticks)
+  const blue = fr.ghosts.some(g => g.state === 'scared' || g.state === 'flashing');
+  if (blue && !P.fright.on) P.fright = {on: true, f0: GT.frames};
+  if (!blue) P.fright = {on: false, f0: 0};
+  // from level 4 on the ghosts flash for most or all of the blue time: flashing only means danger near its end
+  if (P.frightTicksNow() * P.FRAMES_PER_TICK > P.FLASH_SAFE) fr = {...fr, ghosts: fr.ghosts.map(g => g.state === 'flashing' ? {...g, state: 'scared'} : g)};
   // unknown-identity hunters are treated as Blinky (he targets Pac-Man directly)
   let ghosts = fr.ghosts.map(g => ((g.state === 'normal' || g.state === 'flashing') && (!g.name || g.name === '?')) ? {...g, name: 'blinky'} : g);
   const hunters = ghosts.filter(g => g.state === 'normal' || g.state === 'flashing').map(tileOf);
   ghosts = ghosts.map(g => {
-    // flashing ghosts can turn back any moment: treat them as dangerous
+    // flashing ghosts near the end of the blue time can turn back any moment: treat them as dangerous
     if (g.state === 'flashing') g = {...g, state: 'normal'};
     if (g.state !== 'normal') return g;
     // the sim starts ghosts at a tile centre; a ghost well past its centre is put on the next tile
@@ -491,14 +580,37 @@ P.decide = function (fr) {
     if (t.x >= 11 && t.x <= 16 && t.y >= 15 && t.y <= 17) g = {...g, px: OFFX + SCALE * (13 * 8 + 4), py: OFFY + SCALE * (14 * 8 + 4), dir: 'up'};
     return g;
   });
-  P.GHOST_W = P.frightSec() >= 3 ? 60 : 20;
-  // bait: eat a pellet when >= 2 hunters are within 8 tiles and the blue time is long enough to catch them
-  const near = ghosts.filter(g => g.state === 'normal').filter(g => { const t = canvasToTile(g.px, g.py); return Math.abs(t.x - pt.x) + Math.abs(t.y - pt.y) <= 8; }).length;
-  P.bait = near >= 2 && P.frightSec() >= 3;
+  P.eyesBase = blue ? fr.ghosts.filter(g => g.state === 'eyes').length : 0;
+  // bait: hold the pellets until every hunting ghost (at least 3 out of the house) is within BAIT_R steps
+  const fs = P.frightSec(), worth = P.turbo ? fs >= 1 : fs >= 2;
+  P.GHOST_SCALE = worth ? 1 : 0.3;
+  const Dp = bfs([pt]);
+  const hd = ghosts.filter(g => g.state === 'normal').map(g => { const t = canvasToTile(g.px, g.py); return Dp[idx(Math.max(0, Math.min(27, t.x)), t.y)]; });
+  // sticky, so the flag doesn't flicker as a ghost crosses the radius (that made Pac-Man dither and get caught)
+  const near = r => hd.filter(d => d <= r).length >= P.BAIT_N, now = performance.now();
+  if (!worth || blue) P.baitUntil = 0;
+  else if (near(P.BAIT_R)) P.baitUntil = now + P.BAIT_HOLD;
+  else if (!near(P.BAIT_R + 6)) P.baitUntil = 0;
+  P.bait = now < P.baitUntil;
+  // camp: hunters are coming, so wait near a pellet instead of wandering off
+  P.camp = worth && !blue && !P.bait && hd.length >= 2 && hd.filter(d => d <= P.CAMP_R).length >= 2;
+  const E = P.evState, pelletsGone = PELLETS.filter(([x, y]) => P.eaten.has(tileKey(x, y))).length;
+  if (pelletsGone > E.pellets) P.ev('pellet', {bait: E.bait, camp: E.camp, hunterDist: E.hd, dotsLeft: E.dotsLeft});
+  E.pellets = pelletsGone;
+  const eyes = fr.ghosts.filter(g => g.state === 'eyes').length;
+  if (blue && eyes > E.eyes) E.frightGhosts += eyes - E.eyes;
+  if (E.blue && !blue) { P.ev('frightEnd', {ghosts: E.frightGhosts}); E.frightGhosts = 0; }
+  E.eyes = eyes; E.blue = blue; E.bait = P.bait; E.camp = P.camp; E.hd = hd;
+  E.dotsLeft = 244 - P.eaten.size; E.pac = pt;
+  E.ghosts = ghosts.map(g => { const t = canvasToTile(g.px, g.py); return (g.name || '?')[0] + (g.state || '?')[0] + t.x + ',' + t.y; });
   P.fruitOn = false;
   if (fr.fruit) { const ft = canvasToTile(fr.fruit.px, fr.fruit.py); P.fruitOn = ft.y >= 19 && ft.y <= 21 && ft.x >= 12 && ft.x <= 15; }
 
   const res = P.decideCore({...fr, ghosts});
+  // last 80 decisions, copied into P.deathTrails on every death
+  P.trail.push({t: Math.round(performance.now() / 100) / 10, pac: pt.x + ',' + pt.y, dir: res && res.dir, m: res && res.mode, sc: res && res.score,
+                dl: E.dotsLeft, g: E.ghosts.join(' ')});
+  if (P.trail.length > 80) P.trail.shift();
   if (!res || !res.dir || !hunters.length) return res;
   // veto: never step next to a hunting ghost if another exit is safe
   const D = bfs(hunters);
@@ -524,6 +636,7 @@ P.decideBot = function (fr) {
 // ---------------------------------------------------------------- level / death bookkeeping
 function levelCleared() {
   P.levelLog.push({level: P.level(), keys: P.levelPressesExtra + P.pressCount});
+  P.ev('level', {keys: P.levelPressesExtra + P.pressCount});
   P.stats.levels++;
   P.levelPressesExtra = 0; P.pressCount = 0;
   P.resetClock(); P.simCache = null;
@@ -533,6 +646,8 @@ function levelCleared() {
 }
 function lifeLost(n) {
   P.stats.deaths += n;
+  P.ev('death', {pac: P.evState.pac, ghosts: P.evState.ghosts, mode: P.mode, dotsLeft: P.evState.dotsLeft});
+  P.deathTrails.push({level: P.level(), trail: P.trail.slice()});
   P.levelPressesExtra += P.pressCount; P.pressCount = 0;
   ui.update();
 }
@@ -579,7 +694,7 @@ P.start = function () {
         P.tickClock(fr);
         P.updateEaten(fr.pacman);
         const r = P.decideBot(fr);
-        P.mode = r.mode;
+        P.mode = r.mode + (P.bait ? ' BAIT' : P.camp ? ' camp' : '');
         if (r.dir && r.dir !== P.lastDir) P.pulseDirection(r.dir);
       }
     } catch (e) {
@@ -613,6 +728,7 @@ function resetGameState() {
   P.eaten = new Set(); P.absent = new Map(); P.pelletAbsent = new Map();
   P.lastDir = null; P.lastTile = null; P.simCache = null; P.dotsOnScreen = undefined;
   P.pressCount = 0; P.levelPressesExtra = 0; P.levelLog = [];
+  P.events = []; P.trail = []; P.deathTrails = []; P.evState = {pellets: 0, eyes: 0, frightGhosts: 0, blue: false, hd: []};
   P.resetClock();
 }
 async function waitForFocus() {   // the game pauses while its window is blurred (e.g. the popup is open)
@@ -665,6 +781,12 @@ async function newGame(turbo) {
   return P.start();
 }
 P.newRun = () => newGame(false);
+P.summary = () => {
+  const by = t => P.events.filter(e => e.type === t);
+  const pel = by('pellet'), fe = by('frightEnd');
+  return {level: P.level(), deaths: P.stats.deaths, pellets: pel.length, baitPellets: pel.filter(e => e.bait).length,
+          ghostsPerFright: fe.map(e => e.ghosts), deathsAt: by('death').map(e => ({level: e.level, pac: e.pac, mode: e.mode, ghosts: e.ghosts}))};
+};
 P.newTurboRun = () => newGame(true);
 // take over a game already in progress (level count starts at 1; set __pac.stats.levels if needed)
 P.attach = async function (turbo) {
@@ -732,7 +854,7 @@ const ui = {
     let lives = '?';
     try { lives = P.countLives() + 1; } catch (e) {}
     const state = P.running ? (P.turbo ? 'TURBO' : 'PLAY') : P.wanted ? 'WAIT' : 'OFF';
-    status.textContent = `LEVEL ${P.level()}   LIVES ${typeof lives === 'number' ? '●'.repeat(Math.max(0, Math.min(lives, 6))) : lives}\nDEATHS ${P.stats.deaths}   BOT ${state}`;
+    status.textContent = `LEVEL ${P.level()}   LIVES ${typeof lives === 'number' ? '●'.repeat(Math.max(0, Math.min(lives, 6))) : lives}\nDEATHS ${P.stats.deaths}   BOT ${state}\n${P.mode || ''}`;
     if (!P.running && !P.pressCount) keys.textContent = '#0 (idle)';
     const rows = P.levelLog.map(e => `LVL ${String(e.level).padStart(2)}  ${String(e.keys).padStart(4)} keys`);
     const text = 'CLEARED (keys)\n' + (rows.length ? rows.join('\n') : '-');
@@ -754,6 +876,9 @@ function broadcast() {
   lastBroadcast = j;
   window.postMessage({source: 'pacbot', type: 'state', status: s}, '*');
 }
+P._ = {MAP_PACMAN, COLS, ROWS, DIRS, DX, DY, OPP, PELLETS, CORNER, wrapX, idx, tileChar, open, isDotTile, isTunnel, noUp, exits, tileKey, FRUIT_DIST,
+       tileOf, canvasToTile, bfs, routes, ghostTarget, ghostChoose, levelCleared, lifeLost, ui,
+       geo: () => ({SCALE, K, OFFX, OFFY})};
 window.addEventListener('message', (e) => {
   if (e.source !== window || !e.data || e.data.source !== 'pacbot-ext') return;
   const {id, cmd} = e.data;

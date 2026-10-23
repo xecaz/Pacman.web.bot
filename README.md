@@ -149,8 +149,8 @@ These settings can be changed live from the console:
 | Setting | Default | Meaning |
 |---|---|---|
 | `__pac.SIM.HORIZON` | 26 | How many steps ahead to simulate. |
-| `__pac.SIM.HIT_R` | 1.0 | Collision distance in tiles. Larger is more careful. |
-| `__pac.GHOST_MARGIN` | 1.04, or 1.07 from level 5 | Treats ghosts as this much faster than they are, to keep more distance. Reset at every decision from the level, so change it in `applyLevel` in `pacbot.js`. |
+| `__pac.SIM.HIT_R` | 1.3 | Collision distance in tiles. Larger is more careful. |
+| `__pac.GHOST_MARGIN` | 1.04 (`__pac.MARGIN`; `L1_GHOST` 1.03 on level 1), tuned in the simulator | Treats ghosts as this much faster than they are, to keep more distance. Reset at every decision from the level, so change `__pac.MARGIN` instead. |
 | `__pac.ADVANCE_FRAC` | 0.2 | How far past a tile's middle a ghost counts as on the next tile. |
 | `__pac.dotValue`, `__pac.distW`, `__pac.pelletValue`, `__pac.fruitTerm` | | Scoring functions. |
 
