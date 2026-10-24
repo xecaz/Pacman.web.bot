@@ -87,7 +87,7 @@ const P = {
         GHOST_FRIGHT: 0.67, FRIGHT_TICKS: 40, HIT_R: 1.3},
   FRAMES_PER_TICK: 8.45, GHOST_MARGIN: 1.04, GHOST_SCALE: 1, ELROY: 20, ADVANCE_FRAC: 0.2,
   bait: false, camp: false, fruitOn: false, fright: {on: false, f0: 0}, eyesBase: 0,
-  BAIT_R: 10, BAIT_N: 3, BAIT_HOLD: 2500, baitUntil: 0, CAMP_R: 16, PELLET_SAVE: -400, PANIC_T: 18, FLASH_SAFE: 30, BOOST: 1, MARGIN: 1.04, L1_GHOST: 1.03, REV_MS: 1000, REV_COST: 30, lastRevT: 0, LAST_DOTS: 4, LAST_DIST_W: 8,
+  BAIT_R: 10, BAIT_N: 3, BAIT_HOLD: 2500, baitUntil: 0, CAMP_R: 16, PELLET_SAVE: -400, PANIC_T: 18, FLASH_SAFE: 30, BOOST: 1, MARGIN: 1.04, L1_GHOST: 1.03, REV_MS: 1000, REV_COST: 30, lastRevT: 0, LAST_DOTS: 4, LAST_DIST_W: 8, STRAY_W: 150, STRAY_R: 4, STRAY_N: 2, PARK: 0, PARK_R: 3, CAMP_W: 4, FRUIT_VALUE: 0, FRUIT_W: 1,
   events: [], trail: [], deathTrails: [], evState: {pellets: 0, eyes: 0, frightGhosts: 0, blue: false, hd: []},
 };
 window.__pac = P;
@@ -349,7 +349,7 @@ function ghostChoose(g, target) {
 
 // Follow one Pac-Man route (a direction per junction) for HORIZON ticks. At tick `rev` all ghosts reverse
 // and the mode becomes `modeAfter`.
-P.simulate = function (start, route, mode, eatenBase, rev, modeAfter, boost = 1) {
+P.simulate = function (start, route, mode, eatenBase, rev, modeAfter, boost = 1, wait = 0) {
   const S = P.SIM;
   const pac = {x: start.pac.x, y: start.pac.y, dir: route[0], prog: 0};
   const gs = start.ghosts.map(g => ({...g, prog: 0}));
@@ -359,7 +359,7 @@ P.simulate = function (start, route, mode, eatenBase, rev, modeAfter, boost = 1)
   const elroy = start.dotsLeft <= P.ELROY;
   for (let t = 0; t < S.HORIZON; t++) {
     if (t === rev) { for (const g of gs) if (g.state !== 'eyes' && !(g.inPen > 0)) g.dir = OPP[g.dir]; if (modeAfter) mode = modeAfter; }
-    pac.prog += fright > 0 ? S.PAC_FRIGHT : S.PAC;
+    if (t >= wait) pac.prog += fright > 0 ? S.PAC_FRIGHT : S.PAC;
     const prevPac = {x: pac.x, y: pac.y};
     if (pac.prog >= 1) {
       pac.prog -= 1;
@@ -485,7 +485,14 @@ P.territory = function (pac, gs) {
   return n;
 };
 P.spacePenalty = res => res.gs ? P.SPACE_W * Math.max(0, P.SPACE_MIN - P.territory(res.pac, res.gs)) : 0;
-P.fruitTerm = pac => P.fruitOn ? 6 * Math.max(0, 30 - Math.min(FRUIT_DIST[idx(pac.x, pac.y)], 30)) : 0;
+const FRUIT_PTS = [100, 300, 500, 500, 700, 700, 1000, 1000, 2000, 2000, 3000, 3000, 5000];
+P.fruitTerm = pac => {
+  if (!P.fruitOn) return 0;
+  const near = Math.max(0, 30 - Math.min(FRUIT_DIST[idx(pac.x, pac.y)], 30));
+  return P.FRUIT_VALUE ? P.FRUIT_W * FRUIT_PTS[Math.min(P.level(), 13) - 1] * near / 30 : 6 * near;
+};
+// parking spots: corners near a pellet, where Pac-Man stops against the wall and can wait with the pellet as an exit
+const isCorner = (x, y) => { const ex = exits(x, y); return ex.length === 2 && ex[0] !== OPP[ex[1]]; };
 
 // Score every route under every scenario; keep its worst case; pick the best first direction.
 // If every route dies in some scenario, choose by the most likely scenario instead.
@@ -504,35 +511,66 @@ P.decideCore = function (fr) {
   });
   const start = {pac: pt, ghosts, dotsLeft, frightTicks, eyesBase: P.eyesBase};
   const R = bfs(dotsArr);
+  // stray dots (few other dots nearby) cost a long trip later if skipped now, so they are worth more
+  const stray = new Set();
+  if (P.STRAY_W) for (const a of dotsArr) {
+    const ai = idx(a.x, a.y) * N;
+    let n = 0;
+    for (const b of dotsArr) if (DIST[ai + idx(b.x, b.y)] <= P.STRAY_R && ++n > P.STRAY_N) break;
+    if (n <= P.STRAY_N) stray.add(tileKey(a.x, a.y));
+  }
+  const strayEaten = res => { if (!stray.size || !res.eatenLocal) return 0; let n = 0; for (const k of res.eatenLocal) if (stray.has(k)) n++; return n; };
   const pelletsLeft = PELLETS.filter(([x, y]) => !P.eaten.has(tileKey(x, y))).map(([x, y]) => ({x, y}));
-  const RP = pelletsLeft.length ? bfs(pelletsLeft) : null;
+  const parks = [];
+  if (P.PARK) for (const p of pelletsLeft) for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const d = DIST[idx(p.x, p.y) * N + idx(x, y)];
+    if (d >= 1 && d <= P.PARK_R && isCorner(x, y)) parks.push({x, y});
+  }
+  const RP = parks.length ? bfs(parks) : pelletsLeft.length ? bfs(pelletsLeft) : null;
   const rs = routes(pt.x, pt.y, Math.round(P.SIM.HORIZON * 1.1));
   const SC = P.scenarios(), LI = SC.length === 3 ? 1 : 0;
   // races are lost by a tile when a ghost read is slightly off: also require surviving ghosts that are a bit faster
   if (P.BOOST > 1) SC.push([...SC[LI].slice(0, 3), P.BOOST]);
-  const byDir = {}, byLikely = {}, noPellet = {}, likelyNP = {};
-  for (const r of rs) {
+  const byDir = {}, byLikely = {}, noPellet = {}, likelyNP = {}, bestRoute = {};
+  const evalRoute = (r, wait) => {
     let worst = Infinity, info = null, likely = -Infinity, ate = false;
     for (let si = 0; si < SC.length; si++) {
       const [mode, rev, modeAfter, boost] = SC[si];
-      const res = P.simulate({...start, pac: {...start.pac}, ghosts: start.ghosts.map(g => ({...g}))}, r, mode, P.eaten, rev, modeAfter, boost || 1);
+      const res = P.simulate({...start, pac: {...start.pac}, ghosts: start.ghosts.map(g => ({...g}))}, r, mode, P.eaten, rev, modeAfter, boost || 1, wait);
       const s = res.dead ? -100000 + res.t * 100
-        : res.dots * P.dotValue(dotsLeft) + res.pellets * P.pelletValue(dotsLeft) + P.GHOST_SCALE * (res.ghostPts + res.chase)
-          - (P.camp && RP && !res.pellets ? 4 * Math.min(RP[idx(res.pac.x, res.pac.y)], 25) : 0)
+        : res.dots * P.dotValue(dotsLeft) + P.STRAY_W * strayEaten(res) + res.pellets * P.pelletValue(dotsLeft) + P.GHOST_SCALE * (res.ghostPts + res.chase)
+          - (P.camp && RP && !res.pellets ? P.CAMP_W * Math.min(RP[idx(res.pac.x, res.pac.y)], 25) : 0)
           + P.fruitTerm(res.pac) - P.distW(dotsLeft) * Math.min(R[idx(res.pac.x, res.pac.y)], 60) - P.spacePenalty(res);
       if (si === LI) likely = s;
       if (res.pellets) ate = true;
       if (s < worst) { worst = s; info = res; }
     }
+    return {worst, info, likely, ate};
+  };
+  const record = (d, worst, info, likely, ate) => {
+    if (!byDir[d] || worst > byDir[d].score) byDir[d] = {score: worst, dead: info.dead};
+    if (byLikely[d] === undefined || likely > byLikely[d]) byLikely[d] = likely;
+    if (!ate && (!noPellet[d] || worst > noPellet[d].score)) noPellet[d] = {score: worst, dead: info.dead, t: info.t};
+    if (!ate && (likelyNP[d] === undefined || likely > likelyNP[d])) likelyNP[d] = likely;
+  };
+  for (const r of rs) {
+    let {worst, info, likely, ate} = evalRoute(r, 0);
     const d = r[0];
     // no dithering: a second reversal within REV_MS costs a lot (ghosts close in while Pac-Man goes back and forth)
     const revCost = performance.now() - P.lastRevT < P.REV_MS ? P.REV_COST : 30;
     const keep = (d === P.lastDir ? 10 : 0) - (d === OPP[P.lastDir] ? revCost : 0);
     worst += keep;
-    if (!byDir[d] || worst > byDir[d].score) byDir[d] = {score: worst, dead: info.dead};
-    if (byLikely[d] === undefined || likely + keep > byLikely[d]) byLikely[d] = likely + keep;
-    if (!ate && (!noPellet[d] || worst > noPellet[d].score)) noPellet[d] = {score: worst, dead: info.dead, t: info.t};
-    if (!ate && (likelyNP[d] === undefined || likely + keep > likelyNP[d])) likelyNP[d] = likely + keep;
+    if (!bestRoute[d] || worst > bestRoute[d].score) bestRoute[d] = {score: worst, r};
+    record(d, worst, info, likely + keep, ate);
+  }
+  // parked on a corner near a pellet while baiting or camping: also score "wait W ticks, then leave by the best route"
+  if (P.PARK && (P.camp || P.bait) && parks.some(q => q.x === pt.x && q.y === pt.y) && ghosts.some(g => g.state === 'normal')) {
+    for (const d in bestRoute) for (const w of [2, 6, P.SIM.HORIZON]) {
+      const {worst, info, likely, ate} = evalRoute(bestRoute[d].r, w);
+      // waiting is not eating: the pellet in a "wait, then pellet" plan is only taken later, when the bait or
+      // panic rule allows it, so park plans count as non-pellet plans. PARK > 0 enables parking and is its bonus.
+      record('park', worst + P.PARK, info, likely + P.PARK, false);
+    }
   }
   // The worst case almost always "dies" somewhere far ahead, and a pellet makes every ghost harmless, so a
   // pellet route would win as a panic button. Unless baiting, avoid pellets while some route survives PANIC_T ticks.
@@ -549,6 +587,11 @@ P.decideCore = function (fr) {
     if (bl && bl.v > -50000) best = {...best, d: bl.d, dead: false, likelyPick: true};
   }
   if (!best) return {dir: null, mode: 'stuck'};
+  if (best.d === 'park') {   // hold a direction into the wall: Pac-Man stays on the corner
+    const cur = fr.pacman.dir || P.lastDir;
+    const blocked = DIRS.filter(d => !open(pt.x + DX[d], pt.y + DY[d]));
+    return {dir: blocked.includes(cur) ? cur : blocked[0], mode: 'park', score: Math.round(best.score)};
+  }
   return {dir: best.d, mode: best.dead ? 'doomed' : best.likelyPick ? 'likely' : 'sim', score: Math.round(best.score)};
 };
 
@@ -627,7 +670,7 @@ P.decideBot = function (fr) {
   P.applyLevel();
   const t = canvasToTile(fr.pacman.px, fr.pacman.py);
   const key = t.x + ',' + t.y + '|' + P.eaten.size;
-  if (P.simCache && P.simCache.key === key && P.simCache.n < 4) { P.simCache.n++; return P.simCache.res; }
+  if (P.simCache && P.simCache.key === key && P.simCache.n < 4 && P.simCache.res.mode !== 'park') { P.simCache.n++; return P.simCache.res; }
   const res = P.decide(fr);
   P.simCache = {key, res, n: 0};
   return res;
